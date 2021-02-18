@@ -180,7 +180,7 @@ router.post("/:id/", authorize, async (req, res, next) => {
 // GET /articles/:id/reviews =>
 // returns all the reviews for the specified article
 
-router.get("/:id/reviews", async (req, res, next) => {
+router.get("/:id/reviews", authorize, async (req, res, next) => {
   try {
     const { reviews } = await ArticlesModel.findById(req.params.id);
     res.status(200).send(reviews);
@@ -193,7 +193,7 @@ router.get("/:id/reviews", async (req, res, next) => {
 //GET /articles/:id/reviews/:reviewId =>
 // returns a single review for the specified article
 
-router.get("/:id/reviews/:reviewId", async (req, res, next) => {
+router.get("/:id/reviews/:reviewId", authorize, async (req, res, next) => {
   try {
     const { reviews } = await ArticlesModel.findById(req.params.id, {
       reviews: {
@@ -215,7 +215,7 @@ router.get("/:id/reviews/:reviewId", async (req, res, next) => {
 // PUT /articles/:id/reviews/:reviewId =>
 // edit the review belonging to the specified article
 
-router.put("/:id/reviews/:reviewId", async (req, res, next) => {
+router.put("/:id/reviews/:reviewId", authorize, async (req, res, next) => {
   try {
     const { reviews } = await ArticlesModel.findById(req.params.id, {
       _id: 0,
@@ -228,18 +228,25 @@ router.put("/:id/reviews/:reviewId", async (req, res, next) => {
 
     if (reviews && reviews.length > 0) {
       const reviewToReplace = { ...reviews[0].toObject(), ...req.body };
-      const modifiedReview = await ArticlesModel.findOneAndUpdate(
-        {
-          _id: mongoose.Types.ObjectId(req.params.id),
-          "reviews._id": mongoose.Types.ObjectId(req.params.reviewId),
-        },
-        { $set: { "reviews.$": reviewToReplace } },
-        {
-          runValidators: true,
-          new: true,
-        }
-      );
-      res.status(200).send(modifiedReview);
+      console.log("review to replace author: ", reviewToReplace.author);
+      if (reviewToReplace.author.toString() != req.author._id.toString()) {
+        const err = new Error("Unauthorized");
+        err.httpStatusCode = 401;
+        next(err);
+      } else {
+        const modifiedReview = await ArticlesModel.findOneAndUpdate(
+          {
+            _id: mongoose.Types.ObjectId(req.params.id),
+            "reviews._id": mongoose.Types.ObjectId(req.params.reviewId),
+          },
+          { $set: { "reviews.$": reviewToReplace } },
+          {
+            runValidators: true,
+            new: true,
+          }
+        );
+        res.status(200).send(modifiedReview);
+      }
     } else {
       next();
     }
@@ -252,19 +259,38 @@ router.put("/:id/reviews/:reviewId", async (req, res, next) => {
 // DELETE /articles/:id/reviews/:reviewId =>
 // delete the review belonging to the specified article
 
-router.delete("/:id/reviews/:reviewId", async (req, res, next) => {
+router.delete("/:id/reviews/:reviewId", authorize, async (req, res, next) => {
   try {
-    // findByIdAndUpdate because we're not deleting the whole article,
-    // we're deleting only one review inside the article
-    const modifiedReview = await ArticlesModel.findByIdAndUpdate(
-      req.params.id,
-      {
-        $pull: {
-          reviews: { _id: req.params.reviewId },
+    const { reviews } = await ArticlesModel.findById(req.params.id, {
+      _id: 0,
+      reviews: {
+        $elemMatch: {
+          _id: req.params.reviewId,
         },
+      },
+    });
+
+    if (reviews && reviews.length > 0) {
+      const reviewToDelete = { ...reviews[0].toObject(), ...req.body };
+      console.log("review to replace author: ", reviewToDelete.author);
+      if (reviewToDelete.author.toString() != req.author._id.toString()) {
+        const err = new Error("Unauthorized");
+        err.httpStatusCode = 401;
+        next(err);
+      } else {
+        // findByIdAndUpdate because we're not deleting the whole article,
+        // we're deleting only one review inside the article
+        const modifiedReview = await ArticlesModel.findByIdAndUpdate(
+          req.params.id,
+          {
+            $pull: {
+              reviews: { _id: req.params.reviewId },
+            },
+          }
+        );
+        res.status(200).send(modifiedReview);
       }
-    );
-    res.status(200).send(modifiedReview);
+    }
   } catch (error) {
     console.log(error);
     next(error);
