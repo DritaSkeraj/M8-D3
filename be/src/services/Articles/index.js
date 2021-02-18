@@ -4,24 +4,28 @@ const ArticlesModel = require("./schema");
 const AuthorModel = require("../Author/AuthorsSchema");
 const mongoose = require("mongoose");
 const q2m = require("query-to-mongo");
-const nodemailer = require('nodemailer');
+const nodemailer = require("nodemailer");
 const smtpTransport = require("nodemailer-smtp-transport");
+
+const { authenticate } = require("../auth/tools");
+const { authorize } = require("../auth/middleware");
 
 const transporter = nodemailer.createTransport(
   smtpTransport({
-  service: 'gmail',
-  host: "smtp.gmail.com",
-  auth: {
-    user: process.env.gmail,
-    pass: process.env.password
-  }
-}));
+    service: "gmail",
+    host: "smtp.gmail.com",
+    auth: {
+      user: process.env.gmail,
+      pass: process.env.password,
+    },
+  })
+);
 
 const sendEmail = async () => {
   try {
     let info = await transporter.sendMail({
+      to: ["drita.skeraj97@gmail.com"],
       from: process.env.gmail,
-      to: "dritaskeraj@gmail.com",
       subject: "Welcome ", // Subject line
       text: `Hi thank you for registering`, // plain text body
       html: `<b>Hi thank you for registering</b>`, // html body
@@ -31,17 +35,22 @@ const sendEmail = async () => {
   }
 };
 
-transporter.sendMail(sendEmail, function(error, info){
+transporter.sendMail(sendEmail, function (error, info) {
   if (error) {
-    console.log(error);
+    // console.log('email:::::::::::', error);
   } else {
-    console.log('Email sent: ' + info.response);
+    console.log("Email sent: " + info.response);
   }
 });
 
-router.post("/", async (req, res, next) => {
+router.post("/", authorize, async (req, res, next) => {
   try {
-    const newArticle = new ArticlesModel(req.body);
+    const payload = {
+      author: [req.author._id],
+      ...req.body,
+    };
+    const newArticle = new ArticlesModel(payload);
+    console.log("new article: ", newArticle);
     const { _id } = await newArticle.save();
     res.status(201).send({ id: _id });
   } catch (error) {
@@ -50,14 +59,18 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-router.get("/", async (req, res, next) => {
+router.get("/", authorize, async (req, res, next) => {
   try {
-    const query = q2m(req.query)
-    const total = await ArticlesModel.countDocuments(query.criteria)
-    const articles = await ArticlesModel.find(query.criteria, query.options.fields).populate("author") //sends author object toObject
-        .sort(query.options.sort)
-        .skip(query.options.skip)
-        .limit(query.options.limit)
+    const query = q2m(req.query);
+    const total = await ArticlesModel.countDocuments(query.criteria);
+    const articles = await ArticlesModel.find(
+      query.criteria,
+      query.options.fields
+    )
+      .populate("author") //sends author object toObject
+      .sort(query.options.sort)
+      .skip(query.options.skip)
+      .limit(query.options.limit);
 
     res.status(200).send({ links: query.links("/articles", total), articles });
   } catch (error) {
@@ -66,7 +79,7 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-router.get("/:id", async (req, res, next) => {
+router.get("/:id", authorize, async (req, res, next) => {
   try {
     const article = await ArticlesModel.findById(req.params.id).populate(
       "author"
@@ -78,21 +91,32 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
-router.put("/:id", async (req, res, next) => {
+router.put("/:id", authorize, async (req, res, next) => {
+  const articleToUpdate = await ArticlesModel.findById(req.params.id);
   try {
-    const article = await ArticlesModel.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      {
-        runValidators: true,
-        new: true,
+    if (articleToUpdate.author[0].toString() != req.author._id.toString()) {
+      const err = new Error("Unauthorized");
+      err.httpStatusCode = 401;
+      next(err);
+    } else {
+      const payload = {
+        author: [req.author._id],
+        ...req.body,
+      };
+      const article = await ArticlesModel.findByIdAndUpdate(
+        req.params.id,
+        payload,
+        {
+          runValidators: true,
+          new: true,
+        }
+      );
+      if (article) res.status(200).send({ article });
+      else {
+        const error = new Error(`Article with id ${req.params.id} not found`);
+        error.httpStatusCode = 404;
+        next(error);
       }
-    );
-    if (article) res.status(200).send({ article });
-    else {
-      const error = new Error(`User with id ${req.params.id} not found`);
-      error.httpStatusCode = 404;
-      next(error);
     }
   } catch (error) {
     console.log(error);
@@ -100,15 +124,22 @@ router.put("/:id", async (req, res, next) => {
   }
 });
 
-router.delete("/:id", async (req, res, next) => {
+router.delete("/:id", authorize, async (req, res, next) => {
+  const articleToDelete = await ArticlesModel.findById(req.params.id);
   try {
-    const article = await ArticlesModel.findByIdAndDelete(req.params.id);
-    if (article) {
-      res.status(200).send({ article });
+    if (articleToDelete.author[0].toString() != req.author._id.toString()) {
+      const err = new Error("Unauthorized");
+      err.httpStatusCode = 401;
+      next(err);
     } else {
-      const error = new Error(`User ${req.params.id} not found`);
-      error.httpStatusCode = 404;
-      next(error);
+      const article = await ArticlesModel.findByIdAndDelete(req.params.id);
+      if (article) {
+        res.status(200).send({ article });
+      } else {
+        const error = new Error(`User ${req.params.id} not found`);
+        error.httpStatusCode = 404;
+        next(error);
+      }
     }
   } catch (error) {
     console.log(error);
@@ -117,10 +148,10 @@ router.delete("/:id", async (req, res, next) => {
 });
 
 // POST /articles/:id => adds a new review for the specified article
-router.post("/:id/", async (req, res, next) => {
+router.post("/:id/", authorize, async (req, res, next) => {
   try {
     const reviewText = req.body.text;
-    const reviewAuthorId = req.body.author;
+    const reviewAuthorId = req.author._id;
 
     const reviewToInsert = {
       text: reviewText,
@@ -194,23 +225,23 @@ router.put("/:id/reviews/:reviewId", async (req, res, next) => {
         },
       },
     });
-    
-    if(reviews && reviews.length > 0) {
-        const reviewToReplace = {...reviews[0].toObject(), ...req.body}
-        const modifiedReview = await ArticlesModel.findOneAndUpdate(
-            {
-                _id: mongoose.Types.ObjectId(req.params.id),
-                "reviews._id": mongoose.Types.ObjectId(req.params.reviewId),
-            }, 
-            { $set: { "reviews.$": reviewToReplace }},
-            {
-                runValidators: true,
-                new: true
-            }
-        )
-        res.status(200).send(modifiedReview)
+
+    if (reviews && reviews.length > 0) {
+      const reviewToReplace = { ...reviews[0].toObject(), ...req.body };
+      const modifiedReview = await ArticlesModel.findOneAndUpdate(
+        {
+          _id: mongoose.Types.ObjectId(req.params.id),
+          "reviews._id": mongoose.Types.ObjectId(req.params.reviewId),
+        },
+        { $set: { "reviews.$": reviewToReplace } },
+        {
+          runValidators: true,
+          new: true,
+        }
+      );
+      res.status(200).send(modifiedReview);
     } else {
-        next()
+      next();
     }
   } catch (error) {
     console.log(error);
